@@ -1,0 +1,444 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NYC TLC Data Engineering Pipeline - Glue ETL with Step Functions orchestration'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mission-deh-hof-nyc-tlc
+    Description: Project name prefix for resources
+  
+  GlueWorkerType:
+    Type: String
+    Default: G.1X
+    AllowedValues: [G.1X, G.2X]
+    Description: Glue worker type
+  
+  NumberOfWorkers:
+    Type: Number
+    Default: 5
+    MinValue: 2
+    MaxValue: 20
+    Description: Number of Glue workers
+  
+  NotificationEmail:
+    Type: String
+    Description: Email for pipeline notifications
+    AllowedPattern: ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+
+Resources:
+  # S3 Bucket
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldRawData
+            Status: Enabled
+            Prefix: raw/
+            ExpirationInDays: 90
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # IAM Role for Glue Jobs
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-glue-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataLakeBucket.Arn
+                  - !Sub '${DataLakeBucket.Arn}/*'
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*'
+
+  # Glue Database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ProjectName}_db'
+        Description: NYC TLC data catalog
+
+  # Glue Job 1: Data Ingestion
+  IngestionJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${ProjectName}-ingestion'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: pythonshell
+        PythonVersion: '3.9'
+        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/glue_download_nyc_tlc_data_Step_1.py'
+      DefaultArguments:
+        '--jobtype': 'historical'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+      MaxRetries: 1
+      Timeout: 60
+      GlueVersion: '3.0'
+      Tags:
+        Project: !Ref ProjectName
+
+  # Glue Job 2: Raw to Curated
+  RawToCuratedJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${ProjectName}-raw-curated-script'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/mission-deh-hof-nyc-tlc-raw-curated-script.py'
+      DefaultArguments:
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${DataLakeBucket}/spark-logs/'
+      MaxRetries: 1
+      Timeout: 120
+      GlueVersion: '4.0'
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !Ref NumberOfWorkers
+      Tags:
+        Project: !Ref ProjectName
+
+  # Glue Job 3: Curated to Aggregated
+  CuratedToAggregatedJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub '${ProjectName}-curated-aggregated-script-updated'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/mission-deh-hof-nyc-tlc-curated-aggregated-script-updated.py'
+      DefaultArguments:
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://${DataLakeBucket}/spark-logs/'
+      MaxRetries: 1
+      Timeout: 120
+      GlueVersion: '4.0'
+      WorkerType: !Ref GlueWorkerType
+      NumberOfWorkers: !Ref NumberOfWorkers
+      Tags:
+        Project: !Ref ProjectName
+
+  # Glue Crawlers
+  RawCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ProjectName}-raw-crawler'
+      Role: !GetAtt GlueJobRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${DataLakeBucket}/raw/hvfhv/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      Configuration: '{"Version":1.0,"CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"}}}'
+
+  CuratedCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ProjectName}-curated-crawler'
+      Role: !GetAtt GlueJobRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${DataLakeBucket}/curated/hvfhv/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  AggregatedCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ProjectName}-aggregated-crawler'
+      Role: !GetAtt GlueJobRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub 's3://${DataLakeBucket}/aggregated/'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  # SNS Topic for notifications
+  PipelineTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-topic'
+      DisplayName: NYC TLC Pipeline Notifications
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # IAM Role for Step Functions
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-stepfunctions-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GlueJobExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: '*'
+        - PolicyName: SNSPublish
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref PipelineTopic
+
+  # Step Functions State Machine
+  PipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-pipeline'
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "NYC TLC Data Pipeline - Sequential processing with failure notifications",
+          "StartAt": "DataIngestion",
+          "States": {
+            "DataIngestion": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${IngestionJob}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyIngestionFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "RawToCurated"
+            },
+            "RawToCurated": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${RawToCuratedJob}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyRawToCuratedFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "CuratedToAggregated"
+            },
+            "CuratedToAggregated": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${CuratedToAggregatedJob}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "NotifyCuratedToAggregatedFailure",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Next": "PipelineSuccess"
+            },
+            "NotifyIngestionFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${PipelineTopic}",
+                "Subject": "NYC TLC Pipeline FAILED - Data Ingestion",
+                "Message.$": "$.error"
+              },
+              "Next": "PipelineFailure"
+            },
+            "NotifyRawToCuratedFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${PipelineTopic}",
+                "Subject": "NYC TLC Pipeline FAILED - Raw to Curated",
+                "Message.$": "$.error"
+              },
+              "Next": "PipelineFailure"
+            },
+            "NotifyCuratedToAggregatedFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${PipelineTopic}",
+                "Subject": "NYC TLC Pipeline FAILED - Curated to Aggregated",
+                "Message.$": "$.error"
+              },
+              "Next": "PipelineFailure"
+            },
+            "PipelineSuccess": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${PipelineTopic}",
+                "Subject": "NYC TLC Pipeline SUCCESS",
+                "Message": "All three jobs completed successfully"
+              },
+              "End": true
+            },
+            "PipelineFailure": {
+              "Type": "Fail",
+              "Cause": "Pipeline failed at one of the Glue jobs"
+            }
+          }
+        }
+
+  # EventBridge Rule for monthly schedule
+  MonthlyScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-monthly-schedule'
+      Description: Trigger pipeline monthly for incremental data
+      ScheduleExpression: 'cron(0 6 5 * ? *)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PipelineStateMachine.Arn
+          RoleArn: !GetAtt EventBridgeRole.Arn
+          Id: StepFunctionsTarget
+
+  # IAM Role for EventBridge
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-eventbridge-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartStepFunctions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !GetAtt PipelineStateMachine.Arn
+
+Outputs:
+  S3BucketName:
+    Description: S3 bucket for data lake
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub '${ProjectName}-bucket'
+
+  GlueDatabaseName:
+    Description: Glue database name
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub '${ProjectName}-database'
+
+  StateMachineArn:
+    Description: Step Functions state machine ARN
+    Value: !GetAtt PipelineStateMachine.Arn
+    Export:
+      Name: !Sub '${ProjectName}-statemachine'
+
+  SNSTopicArn:
+    Description: SNS topic for notifications
+    Value: !Ref PipelineTopic
+    Export:
+      Name: !Sub '${ProjectName}-sns-topic'
+
+  IngestionJobName:
+    Description: Glue ingestion job name
+    Value: !Ref IngestionJob
+
+  RawToCuratedJobName:
+    Description: Glue raw to curated job name
+    Value: !Ref RawToCuratedJob
+
+  CuratedToAggregatedJobName:
+    Description: Glue curated to aggregated job name
+    Value: !Ref CuratedToAggregatedJob
