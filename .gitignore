@@ -35,3 +35,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Resume
+PROJECT_RESUME.md
