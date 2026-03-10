@@ -4,7 +4,7 @@ Description: 'NYC TLC Data Engineering Pipeline - Glue ETL with Step Functions o
 Parameters:
   ProjectName:
     Type: String
-    Default: mission-deh-hof-nyc-tlc
+    Default: nyc-tlc
     Description: Project name prefix for resources
   
   GlueWorkerType:
@@ -125,7 +125,7 @@ Resources:
       Command:
         Name: glueetl
         PythonVersion: '3'
-        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/mission-deh-hof-nyc-tlc-raw-curated-script.py'
+        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/nyc-tlc-raw-curated-script.py'
       DefaultArguments:
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-metrics': 'true'
@@ -148,7 +148,7 @@ Resources:
       Command:
         Name: glueetl
         PythonVersion: '3'
-        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/mission-deh-hof-nyc-tlc-curated-aggregated-script-updated.py'
+        ScriptLocation: !Sub 's3://${DataLakeBucket}/scripts/nyc-tlc-curated-aggregated-script-updated.py'
       DefaultArguments:
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-metrics': 'true'

@@ -6,7 +6,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "JobName": "mission-deh-hof-nyc-tlc-ingestion"
+        "JobName": "nyc-tlc-ingestion"
       },
       "Retry": [
         {
@@ -33,7 +33,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "JobName": "mission-deh-hof-nyc-tlc-raw-curated-script"
+        "JobName": "nyc-tlc-raw-curated-script"
       },
       "Retry": [
         {
@@ -60,7 +60,7 @@
       "Type": "Task",
       "Resource": "arn:aws:states:::glue:startJobRun.sync",
       "Parameters": {
-        "JobName": "mission-deh-hof-nyc-tlc-curated-aggregated-script-updated"
+        "JobName": "nyc-tlc-curated-aggregated-script-updated"
       },
       "Retry": [
         {
